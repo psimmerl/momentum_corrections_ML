@@ -104,5 +104,5 @@ Non-trainable params: 6,688
 __________________________________________________________________________________________________
 ```
 
-![best model plot](https://github.com/psimmerl/momentum_corrections_ML/models/best_model.png)
+![best model plot](https://github.com/psimmerl/momentum_corrections_ML/blob/main/models/best_model.png)
 
