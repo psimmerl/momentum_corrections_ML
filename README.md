@@ -10,7 +10,7 @@ y = [ log(good_pro_P) - log(bad_pro_P), good_mm2 - bad_mm2 ]
 ```
 
 ## Performance:
-* https://github.com/psimmerl/momentum_corrections_ML/analysis.ipynb
+* [Analysis.ipynb](analysis.ipynb)
 
 ## Feature Importances From a High Variance Random Forest:
 > Using a random forest I got a better validation MSE without any regularization/tuning, might be good to test some other models too.
@@ -104,5 +104,5 @@ Non-trainable params: 6,688
 __________________________________________________________________________________________________
 ```
 
-![best model plot](https://github.com/psimmerl/momentum_corrections_ML/blob/main/models/best_model.png)
+![best model plot](models/best_model.png)
 
