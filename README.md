@@ -1,4 +1,4 @@
-# Proton Momentum Corrections for CLAS12
+# Example Proton Momentum Corrections for CLAS12
 
 The neural network predicts $\Delta \log(\text{proton}_P)$, uses a custom layer to calculte $\text{MM}^2$, then simultaneously minimizes $\Delta \log(\text{proton}_P)$ and $\Delta \text{MM}^2$. (see the image at the bottom)
 * Using $\log(\text{proton}_P)$ transforms the input and output distributions to pseudo-Gaussian.
