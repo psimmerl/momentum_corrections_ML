@@ -1,4 +1,4 @@
-# Proton Momentum Corrections for CLAS12
+# Example Proton Momentum Corrections for CLAS12
 
 
 ## Loss function minimum is in the wrong spot when doing simultaneous corrections
@@ -59,6 +59,13 @@ The neural network predicts $\Delta \log(\text{proton}_P)$, uses a custom layer 
 X = [ log(ele_P), ele_Theta, ele_Phi, log(bad_pro_P), bad_pro_Theta, bad_pro_Phi, log(bad_Q2), log(bad_t) ]
 y = [ log(good_pro_P) - log(bad_pro_P), good_mm2 - bad_mm2 ]
 ```
+
+While I am training with respect to the electron momentum it would be very easy to split the input and train on just the proton momentum while still using my Lambda layer to calculate $\text{MM}^2$. Then when we want to deploy the model, we just extract the the layers that predict $\Delta \text{proton}_P$ and we are independent of electron statistics.
+
+e.g.
+![split input](split_input.png)
+
+Figure 10-15 from Hands-On Machine Learning with Scikit-Learn, Keras, and TensorFlow, 2nd Edition by Aurélien Géron
 
 ## Performance:
 * [Analysis.ipynb](analysis.ipynb)
