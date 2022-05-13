@@ -1,152 +1,144 @@
-import os
+"""
+May need to do pretraining on p0 and e0 then switch over to MM2 training
+Or use secondary losses to regularize submodels
+Or decay the MM2E reg term e.g. 1000 to 0.1 over ~10 epochs
+Or train them asynchronously(?)
+"""
+import ROOT
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.layers import Dense, Input, Lambda, BatchNormalization, Dropout, LeakyReLU, Activation
+from tensorflow.keras.layers import Dense, Input, BatchNormalization, concatenate
 from tensorflow.keras.models import Sequential
-import keras_tuner as kt
+from tensorflow.keras.optimizers import RMSprop, Adam, Nadam
+from tensorflow.keras.regularizers import L2
 
-X_train = np.load('data/X_train_all_feats.npy')
-y_train = np.load('data/y_train_all_feats.npy')
 
-X_valid = np.load('data/X_valid_all_feats.npy')
-y_valid = np.load('data/y_valid_all_feats.npy')
+def convert_data(fname: str = 'data/raw/lvl2_eppi0.inb.mc.root',
+                 ttree_name: str = 'h22',
+                 seed: int = 42) -> tuple[np.ndarray]:
+  rdf = ROOT.RDataFrame(ttree_name, fname)
+  nevs = rdf.Count().GetValue()
 
-def CalcMM2(x):
-  # Cartesian
-  # mean_X  = tf.constant([1.04684507e-03, 3.99276990e-03, 5.54965746e+00, -1.35728314e-03, -3.17695929e-03, 9.60693938e-01])
-  # scale_X = tf.constant([0.97338996, 0.97730009, 1.3635807, 0.40069781, 0.40065214, 0.49844655])
+  X_feats = ['E', 'P', 'Theta', 'Phi']
+  y_feats = ['x', 'y', 'z']
 
-  # Spherical
-  # mean_X  = tf.constant([ 5.72991007,  0.2579039,  -0.09691791,  1.09272128,  0.48494906, -0.01878646])
-  # scale_X = tf.constant([1.31483893, 0.08475765, 1.82449035, 0.54629188, 0.13847994, 1.82014073])
+  vals = 'eE,eP,eTheta,ePhi,pE,pP,pTheta,pPhi'
+  rdf = rdf.Define(
+      'vals', '''
+  TLorentzVector ele(ex, ey, ez, 0.000510999), pro(px, py, pz, 0.938272081);
+  auto eE = ele.E(), eP = ele.P(), eTheta = ele.Theta(), ePhi = ele.Phi();
+  auto pE = pro.E(), pP = pro.P(), pTheta = pro.Theta(), pPhi = pro.Phi();
+  return vector<double>{''' + vals + '};')
+  for i, val in enumerate(vals.split(',')):
+    rdf = rdf.Define(val, f'vals[{i}]')
 
-  # Spherical with log(Q2) and log(t)
-  # mean_X  = tf.constant([5.729910068550966, 0.25790390434770494, -0.0969179068165942, 1.0927212793110743, 0.48494905542094124, -0.018786463892064623, 1.263540776502531, -0.2643839382949719, ])
-  # scale_X = tf.constant([1.3148389266636, 0.08475764952525691, 1.8244903543417919, 0.5462918841848049, 0.13847994287641613, 1.8201407301860681, 0.3892811506389084, 0.7268083601619448, ])
+  # Should be doing this with a hash to guarantee reproducibility
+  idxs = np.random.default_rng(seed=seed).permutation(nevs)
+  X = np.stack([
+      np.stack([rdf.AsNumpy([k])[k] for k in ['e' + ft for ft in X_feats]]).T,
+      np.stack([rdf.AsNumpy([k])[k] for k in ['p' + ft for ft in X_feats]]).T
+  ],
+               axis=-1)[idxs, :, :]
+  y = np.stack([
+      np.stack([rdf.AsNumpy([k])[k] for k in ['e' + ft for ft in y_feats]]).T,
+      np.stack([rdf.AsNumpy([k])[k] for k in ['p' + ft + '0' for ft in y_feats]]).T
+  ],
+               axis=-1)[idxs, :, :]
 
-  # Spherical with log(p0), log(pP), log(eP), log(Q2), and log(t)
-  mean_X  = tf.constant([1.712782369548623, 0.25790390434770494, -0.0969179068165942, -0.013550632960287997, 0.48494905542094124, -0.018786463892064623, 1.263540776502531, -0.2643839382949719, ])
-  scale_X = tf.constant([0.27440008795120685, 0.08475764952525691, 1.8244903543417919, 0.4399088483504666, 0.13847994287641613, 1.8201407301860681, 0.3892811506389084, 0.7268083601619448, ])
-  mean_y  = tf.constant([0.02577764878163872, 0.025417884420961278, ])
-  scale_y = tf.constant([0.04114841268106677, 0.09791073484206517, ])
+  # split data into 20% testing, 20% validation, and 60% training
+  split_idx = nevs // 5
+  X_test, X_valid, X_train = X[:split_idx, :, :], X[split_idx:2 * split_idx, :, :], X[2 * split_idx:, :, :]
+  y_test, y_valid, y_train = y[:split_idx, :, :], y[split_idx:2 * split_idx, :, :], y[2 * split_idx:, :, :]
 
-  emass, pmass, beamE = 0.000510999, 0.938272081, 10.6041
+  return X_train, X_valid, X_test, y_train, y_valid, y_test
 
-  in_fixed = x[0]*scale_X + mean_X
 
-  # exyz, pxyz = in_fixed[:,:3], in_fixed[:,3:6]
-  eptf, pptf = in_fixed[:,:3], in_fixed[:,3:6]
+class MissingMassSquaredError(keras.losses.Loss):
+  """Missing Mass Squared Error"""
+  def __init__(self, beam_E: float = 10.6041, reg: float = False, name: str = 'MM2E') -> None:
+    super().__init__(name=name)
+    self.PION_MASS = 0.1349768  # GeV
+    self.PROTON_MASS = 0.9382721  # GeV
+    self.ELECTRON_MASS = 0.0005110  # GeV
 
-  p = x[1]*scale_y[0] + mean_y[0]
-  p = tf.exp(p + pptf[:,0:1])
-  # p = tf.exp(x[1])
+    self.METRIC = tf.constant([1., -1., -1., -1.])
+    self.BEAM = tf.constant([beam_E, 0, 0, (beam_E**2 - self.ELECTRON_MASS**2)**(1 / 2)])
+    self.TARGET = tf.constant([self.PROTON_MASS, 0, 0, 0])
+    self.BT = self.BEAM + self.TARGET
 
-  eptf = tf.concat([tf.exp(eptf[:,0:1]), eptf[:,1:]], axis=1)
-  pptf = tf.concat([tf.exp(pptf[:,0:1]), pptf[:,1:]], axis=1)
+    self.reg = reg
 
-  exyz = tf.stack([eptf[:,0]*tf.cos(eptf[:,2])*tf.sin(eptf[:,1]), 
-                    eptf[:,0]*tf.sin(eptf[:,2])*tf.sin(eptf[:,1]), 
-                    eptf[:,0]*tf.cos(eptf[:,1])], axis=1)
-  pxyz = tf.stack([pptf[:,0]*tf.cos(pptf[:,2])*tf.sin(pptf[:,1]), 
-                    pptf[:,0]*tf.sin(pptf[:,2])*tf.sin(pptf[:,1]), 
-                    pptf[:,0]*tf.cos(pptf[:,1])], axis=1)
+  def call(self, y_true, y_pred, sample_weight=None) -> tf.Tensor:
+    # print(y_pred[:3], y_true[:3])
+    eleP2_pred = y_pred[:, 0, None]**2 * tf.reduce_sum(y_true[:, :, 0]**2, axis=-1, keepdims=True)
+    proP2_pred = y_pred[:, 1, None]**2 * tf.reduce_sum(y_true[:, :, 1]**2, axis=-1, keepdims=True)
+    # print(eleP2_pred[:3], proP2_pred[:3])
 
-  beam = tf.constant([0., 0., beamE, np.sqrt(beamE**2 + emass**2)])
-  targ = tf.constant([0., 0., 0., pmass])
+    ele = tf.concat([(self.ELECTRON_MASS**2 + eleP2_pred)**(1 / 2), y_pred[:, 0, None] * y_true[:, :, 0]], axis=1)
+    pro = tf.concat([(self.PROTON_MASS**2 + proP2_pred)**(1 / 2), y_pred[:, 1, None] * y_true[:, :, 1]], axis=1)
+    # print(ele[:3], pro[:3])
 
-  eleE = tf.sqrt(emass**2 + eptf[:,0:1]**2)
-  ele  = tf.concat([exyz, eleE], axis=1)
+    MM2_pred = tf.reduce_sum(self.METRIC * (self.BT - ele - pro)**2, axis=-1, keepdims=True)
+    # print(MM2_pred[:3])
 
-  proE_X = tf.sqrt(pmass**2 + pptf[:,0:1]**2)
-  pro_X  = tf.concat([pxyz, proE_X], axis=1)
-  mm2_X = tf.reduce_sum((beam + targ - ele - pro_X)**2 * [-1, -1, -1, 1], axis=1, keepdims=True)
+    if self.reg:
+      return tf.reduce_mean((1 - MM2_pred / self.PION_MASS**2)**2) + \
+                            self.reg * tf.math.reduce_mean(tf.square(1 - y_pred))
+    return tf.reduce_mean((1 - MM2_pred / self.PION_MASS**2)**2)
 
-  pp0 = p / pptf[:,0:1]
 
-  proE = tf.sqrt(pmass**2 + pp0**2 * pptf[:,0:1]**2)
-  pro  = tf.concat([pp0*pxyz, proE], axis=1)
-  mm2 = tf.reduce_sum((beam + targ - ele - pro)**2 * [-1, -1, -1, 1], axis=1, keepdims=True)
-  
-  # return tf.concat([x[1], mm2], axis=1)
+def build_submodel() -> tuple[keras.layers.Layer, keras.layers.Layer]:
+  input = keras.layers.Input(shape=4)  # E, |p|, theta, phi
+  x = BatchNormalization()(input)
+  for ilay in range(4):
+    x = Dense(units=128, activation='elu', kernel_initializer='he_normal')(x)
+    x = BatchNormalization()(x)
+  # using softplus to prevent going negative
+  output = Dense(units=1, activation='softplus')(x)
+  return input, output
 
-  dmm2 = (mm2 - mm2_X)
-  dmm2 = (dmm2 - mean_y[1]) / scale_y[1]
-  return tf.concat([x[1], dmm2], axis=1)
 
-def build_model(hp):
-  opt    = hp.Choice("opt", ['Adam', 'RMSprop'])#, 'SGD'])
-  act    = hp.Choice("act", ['elu', 'relu', 'LeakyReLU'])
-  # cv     = hp.Int("clip", min_value=1,  max_value=10)
-  layers = hp.Int("layers", min_value=2,    max_value=8)
-  units  = hp.Int("units",  min_value=64,   max_value=1024)#,  sampling='log')
-  lr     = hp.Float("lr",   min_value=1e-7, max_value=1e-2, sampling='log')
-  DO     = hp.Float("DO",   min_value=0.0,  max_value=0.5,  step=0.1, default=0.0)
-  ki     = 'he_normal'
+def build_model(MM2E_reg=False) -> tuple[keras.models.Model]:
+  ele_in, ele_out = build_submodel()
+  pro_in, pro_out = build_submodel()
+  concat_outputs = concatenate([ele_out, pro_out])
 
-  input_ = Input(shape=X_train.shape[1:])
-  if DO > 0: x = Dropout(DO)(input_)
-  else: x = BatchNormalization()(input_)
-  
-  for i in range(layers):
-    x = Dense(units=units, kernel_initializer=ki)(x)# if i else input_)
+  ele_model = keras.Model(inputs=[ele_in], outputs=[ele_out], name='Electron')
+  pro_model = keras.Model(inputs=[pro_in], outputs=[pro_out], name='Proton')
+  full_model = keras.Model(inputs=[ele_in, pro_in], outputs=[concat_outputs], name='Full')
 
-    if act == 'LeakyReLU': x = LeakyReLU(alpha=0.2)(x)
-    else: x = Activation(act)(x)
-
-    if DO > 0: x = Dropout(DO)(x)
-    else: x = BatchNormalization()(x)
-  
-  x = Dense(units=1, activation='linear', name='P')(x)
-  output = Lambda(CalcMM2, name='CalcMM2')([input_, x])
-
-  model = keras.Model(inputs=[input_], outputs=[output])
-
-  if opt == 'Adam':
-    optimizer = keras.optimizers.Adam(learning_rate=lr)#, clipvalue=cv)
-  elif opt == 'RMSprop':
-    optimizer = keras.optimizers.RMSprop(learning_rate=lr)#, rho=0.9)#, clipvalue=cv)
-  elif opt == 'SGD':
-    optimizer = keras.optimizers.SGD(learning_rate=lr, nesterov=True)#, clipvalue=1.0)
-
-  model.compile(loss='mse', optimizer=optimizer, jit_compile=True)
-
-  # model.summary()
-  # keras.utils.plot_model(model, 'mm2_model.png')#, show_shapes=True)
-  return model
+  opt = Adam()  #clipnorm=1.0)
+  full_model.compile(loss=MissingMassSquaredError(reg=MM2E_reg), optimizer=opt)#, jit_compile=True)  #, run_eagerly=True)
+  return full_model, ele_model, pro_model
 
 
 if __name__ == '__main__':
-  # from joblib import load
-  # scalerX = load('data/scaler_X.joblib')
-  # mean_X, scale_X = scalerX.mean_, scalerX.scale_
-  # print(mean_X, scale_X)
+  tf.random.set_seed(42)
+  np.random.seed(42)
 
-  # scalery = load('data/scaler_y.joblib')
-  # mean_y, scale_y = scalery.mean_, scalery.scale_
-  # print(mean_y, scale_y)
+  X_train, X_valid, X_test, y_train, y_valid, y_test = convert_data()
+  model, ele_model, pro_model = build_model(MM2E_reg=False)
+
+  mm2_loss = MissingMassSquaredError()
+  print(f"0 - Naive train MM2E: {mm2_loss.call(y_train, np.zeros((len(y_train), 2))).numpy()}")
+  print(f"0 - Naive valid MM2E: {mm2_loss.call(y_valid, np.zeros((len(y_valid), 2))).numpy()}")
+  print(f"1 - Naive train MM2E: {mm2_loss.call(y_train, np.ones((len(y_train), 2))).numpy()}")
+  print(f"1 - Naive valid MM2E: {mm2_loss.call(y_valid, np.ones((len(y_valid), 2))).numpy()}")
 
   callbacks = [
-    keras.callbacks.EarlyStopping(monitor='val_loss', patience=25, restore_best_weights=True),
-    keras.callbacks.ModelCheckpoint(f'models/model.h5', save_best_only=True),
-    keras.callbacks.TensorBoard('logs/tensorboard/')
+      keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
   ]
+  history = model.fit([X_train[:, :, 0], X_train[:, :, 1]],
+                      y_train,
+                      validation_data=([X_valid[:, :, 0], X_valid[:, :, 1]], y_valid),
+                      epochs=50,
+                      batch_size=32,
+                      callbacks=callbacks)
 
-  tuner = kt.RandomSearch(build_model, objective='val_loss', max_trials=500, 
-  # tuner = kt.BayesianOptimization(build_model, objective='val_loss', max_trials=250, 
-                          overwrite=True, directory='logs', project_name='diy_space_heater', seed=42)
-  
-  try:
-    tuner.search(X_train, y_train, epochs=1000, batch_size=512, validation_data=(X_valid, y_valid), callbacks=callbacks, verbose=2)
-  except:
-    print("Keyboard Interrupt!")
+  model.evaluate([X_train[:, :, 0], X_train[:, :, 1]], y_train)
+  model.evaluate([X_valid[:, :, 0], X_valid[:, :, 1]], y_valid)
 
-  tuner.results_summary()
-  best_model = tuner.get_best_models(num_models=1)[0]
-
-  print("\nEvaluating Best Model:")
-  best_model.evaluate(X_train, y_train)
-  best_model.evaluate(X_valid, y_valid)
-
-  keras.utils.plot_model(best_model, 'models/best_model.png', show_shapes=True, show_layer_activations=True)
-  best_model.save('models/best_model.h5')
+  print(f"Train MM2E for train: {mm2_loss.call(y_train, model([X_train[:,:,0], X_train[:,:,1]])).numpy()}")
+  print(f"Valid MM2E for valid: {mm2_loss.call(y_valid, model([X_valid[:,:,0], X_valid[:,:,1]])).numpy()}")
+  print(model([X_valid[:, :, 0], X_valid[:, :, 1]])[:10])

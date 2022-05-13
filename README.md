@@ -1,5 +1,56 @@
 # Proton Momentum Corrections for CLAS12
 
+
+## Loss function minimum is in the wrong spot when doing simultaneous corrections
+
+[MM2_Corrections_Error.pdf](MM2_Corrections_Error.pdf)
+
+<!-- Loss function:
+$$
+J = \mathbb{E}\left[ \left(MM^2_{\pi_0} - MM^2_{pred}\right)^2\right]
+$$
+
+In practice I use: (equivalent to changing learning rate)
+$$
+J = \mathbb{E}\left[ \left(1 - \frac{MM^2_{pred}}{MM^2_{\pi_0}}\right)^2\right]
+$$
+
+$$
+\pi_0 = beam + targ - e' - p' \\
+MM^2 = (beam + targ - e' - p')^2
+$$
+
+$$
+eE1' = \sqrt{(c1*ex')^2 + (c1*ey')^2 + (c1*ez')^2 + eM^2)}\\
+pE2' = \sqrt{(c1*ex')^2 + (c1*ey')^2 + (c1*ez')^2 + eM^2)}\\
+$$
+
+$$
+E = eE + pE - eE1'   - pE2'\\
+x = ex + px - c1*ex' - c2*px'\\
+y = ey + py - c1*ey' - c2*py'\\
+z = ez + pz - c1*ez' - c2*pz'\\
+$$
+
+
+if c1, c2 = 0, 0:
+$$
+E = eE + pM - 0 - pM\\
+x =  0 +  0 - 0 - 0\\
+y =  0 +  0 - 0 - 0\\
+z = eE +  0 - 0 - 0\\
+
+MM^2 = ( eE )^2 - ( eE )^2 = 0\\
+MM^2_{\pi_0} = 0.138^2 = 0.019044
+$$
+
+With the data:
+* c1,c2=0,0 - $MM^2$ error: 0.0009 $GeV^2$ (0.03 $GeV$)
+* c1,c2=1,1 - $MM^2$ error: 0.007 $GeV^2$ (0.08 $GeV$) -->
+
+<!-- ---
+# Archive
+
 The neural network predicts $\Delta \log(\text{proton}_P)$, uses a custom layer to calculte $\text{MM}^2$, then simultaneously minimizes $\Delta \log(\text{proton}_P)$ and $\Delta \text{MM}^2$. (see the image at the bottom)
 * Using $\log(\text{proton}_P)$ transforms the input and output distributions to pseudo-Gaussian.
 * Bad exploding gradient problem -> use Adam/RMSprop with small learning_rate or SGD with clipnorm/clipval
@@ -105,4 +156,4 @@ ________________________________________________________________________________
 ```
 
 ![best model plot](models/best_model.png)
-
+ -->
