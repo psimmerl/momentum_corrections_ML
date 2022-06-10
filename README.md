@@ -1,9 +1,23 @@
 # Example Proton Momentum Corrections for CLAS12
 
+To run full model
+```bash
+python train.py
+```
+
+To run proton only model
+```bash
+python train_just_pro.py
+```
 
 ## Loss function minimum is in the wrong spot when doing simultaneous corrections
 
 [MM2_Corrections_Error.pdf](MM2_Corrections_Error.pdf)
+
+## Tasks:
+* Maybe subclass for easier movement into production
+* Come up with a better fix than adding 0.5 to the prediction factor
+* Extend model for N particle corrections -- might be hard
 
 <!-- Loss function:
 $$
